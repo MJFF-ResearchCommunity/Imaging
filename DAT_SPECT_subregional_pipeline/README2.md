@@ -168,13 +168,10 @@ module load matlab-spm # instead of downloading the software, load the pre-insta
 # Create logs directory
 mkdir -p ./scripts/logs
 
-matlab -batch "
-spm('defaults', 'FMRI');
-spm_jobman('initcfg');
-addpath('./scripts');
-flip_nii('./coregistered_DAT', './scripts/logs/flip_nii.log');
-coregister('./coregistered_DAT', './masks/symFPCITtemplate_MNI_norm.nii', './scripts/logs/coregister.log');
-reslice_masks('./coregistered_DAT', './masks', './scripts/logs/reslice_mask.log');
-extract_means_SBR_all_patients('./coregistered_DAT', './results.csv', './scripts/logs/extract_SBR.log');
-"
-```
+matlab -batch "spm('defaults', 'FMRI'); \
+spm_jobman('initcfg'); \
+addpath('./scripts'); \
+flip_nii('./coregistered_DAT', './scripts/logs/flip_nii.log'); \
+coregister('./coregistered_DAT', './masks/symFPCITtemplate_MNI_norm.nii', './scripts/logs/coregister.log'); \
+reslice_masks('./coregistered_DAT', './masks', './scripts/logs/reslice_mask.log'); \
+extract_means_SBR_all_patients('./coregistered_DAT', './results.csv', './scripts/logs/extract_SBR.log');"
