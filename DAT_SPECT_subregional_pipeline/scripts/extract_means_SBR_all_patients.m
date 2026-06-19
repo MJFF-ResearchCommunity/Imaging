@@ -1,13 +1,55 @@
-function extract_means_SBR_all_patients()
+function extract_means_SBR_all_patients(varargin)
 %% Extract mean counts per ROI + compute SBR using SLF as reference, all patients
 % - Requires: resliced binary masks in <patient>\resliced_masks\ from prior step
 % - Writes Excel with real formulas for SBR columns
-% - SPM12 must be on path
+% - SPM12 may be on path
+%
+% Usage:
+%   extract_means_SBR_all_patients()                                    % Uses default paths
+%   extract_means_SBR_all_patients(root_pat)                           % Specify root patient directory only
+%   extract_means_SBR_all_patients(root_pat, out_csv)                 % Specify root and output CSV file
+%   extract_means_SBR_all_patients(root_pat, out_xlsx, log_file)      % Specify paths and log file
+%   extract_means_SBR_all_patients(root_pat, out_xlsx, log_file, spm_path) % Specify all paths including optional SPM path
 
-addpath('SPM_path');
+% Parse input arguments
+if nargin >= 1
+    root_pat = varargin{1};
+else
+    root_pat = 'coregistered_DAT';  % Default patient root directory
+end
 
-root_pat  = 'output_path';
-out_xlsx  = fullfile(root_pat, 'SBR_SLF.xlsx');
+if nargin >= 2
+    out_csv = varargin{2};
+else
+    out_csv = fullfile(root_pat, 'SBR_SLF.csv');  % Default output CSV file
+end
+
+if nargin >= 3
+    log_file = varargin{3};
+else
+    log_file = './priv/extract_SBR.log';  % Default log file path
+end
+
+if nargin >= 4 && ~isempty(varargin{4})
+    smp_path = varargin{4};
+    addpath(smp_path);
+    fprintf('Added SPM path: %s\n', smp_path);
+end
+
+% --- Setup logging ---
+[log_dir, log_name, log_ext] = fileparts(log_file);
+if ~isempty(log_dir) && ~exist(log_dir, 'dir')
+    try mkdir(log_dir); catch, log_file = [log_name log_ext]; end
+end
+
+log_fid = fopen(log_file, 'w');
+if log_fid == -1, log_fid = []; end
+log_msg = @(msg) fprintf_both(log_fid, msg);
+
+log_msg(sprintf('=== Extract SBR Means Log - %s ===\n', datestr(now)));
+log_msg(sprintf('Root patient directory: %s\n', root_pat));
+log_msg(sprintf('Output CSV file: %s\n', out_csv));
+log_msg(sprintf('Log file: %s\n\n', log_file));
 
 % ---- mask filenames expected INSIDE each subject's "resliced_masks" ----
 % (exactly as created by the previous reslicing script)
@@ -35,95 +77,65 @@ rows = {};  % will build a cell array row-by-row
 
 for s = 1:numel(D)
     subj_dir = fullfile(root_pat, D(s).name);
+    mdir = fullfile(subj_dir, 'resliced_masks');
 
-    % choose SPECT (prefer flippedZ)
-    F1 = dir(fullfile(subj_dir,'r*flippedZ.nii'));
-    F2 = dir(fullfile(subj_dir,'r*BRAIN_SPECT*.nii'));
-    F  = [F1; F2];
-    if isempty(F)
-        fprintf('[%s] No r* SPECT found. Skipping.\n', D(s).name);
+    % Find SPECT and validate directories
+    F = [dir(fullfile(subj_dir,'r*flippedZ.nii')); dir(fullfile(subj_dir,'r*BRAIN_SPECT*.nii'))];
+    if isempty(F) || ~exist(mdir,'dir')
+        log_msg(sprintf('[%s] Missing SPECT or resliced_masks folder. Skipping.\n', D(s).name));
         continue;
     end
-    [~,idx] = max([F.datenum]);  % most recent
+    
+    [~,idx] = max([F.datenum]);
     spect_img = fullfile(F(idx).folder, F(idx).name);
 
-    % folder with resliced masks
-    mdir = fullfile(subj_dir, 'resliced_masks');
-    if ~exist(mdir,'dir')
-        fprintf('[%s] No resliced_masks folder. Skipping.\n', D(s).name);
-        continue;
-    end
-
-    % read SPECT volume
+    % Read SPECT volume
     try
-        Vs = spm_vol(spect_img);
-        Ys = spm_read_vols(Vs);
+        Ys = spm_read_vols(spm_vol(spect_img));
     catch ME
-        warning('[%s] Failed reading SPECT: %s', D(s).name, ME.message);
+        log_msg(sprintf('[%s] Failed reading SPECT: %s\n', D(s).name, ME.message));
         continue;
     end
 
-    % --- means ---
+    % Extract means and calculate SBR
     meanSLF = mean_in_mask(Ys, fullfile(mdir, ref_mask));
-    meanOcc = mean_in_mask(Ys, fullfile(mdir, occ_mask));  % may be NaN if mask missing
-
-    roi_means = nan(1, numel(roi_masks));
-    for i = 1:numel(roi_masks)
-        roi_means(i) = mean_in_mask(Ys, fullfile(mdir, roi_masks{i}));
-    end
-
-    % build one row (subject id + means; SBR columns added later as formulas)
-    row = [{D(s).name}, {meanSLF}, {meanOcc}, num2cell(roi_means)];
+    meanOcc = mean_in_mask(Ys, fullfile(mdir, occ_mask));
+    roi_means = arrayfun(@(i) mean_in_mask(Ys, fullfile(mdir, roi_masks{i})), 1:numel(roi_masks));
+    roi_sbr = (roi_means - meanSLF) / meanSLF;  % SBR = (ROI - SLF) / SLF
+    
+    % build one row (subject id + means + calculated SBR values)
+    row = [{D(s).name}, {meanSLF}, {meanOcc}, num2cell(roi_means), num2cell(roi_sbr)];
     rows(end+1,1:numel(row)) = row; %#ok<AGROW>
+    log_msg(sprintf('[%s] OK - extracted means and calculated SBR for %d ROIs\n', D(s).name, numel(roi_masks)));
 end
+
+log_msg(sprintf('\nProcessed %d subjects successfully\n', size(rows,1)));
 
 if isempty(rows)
     error('No subjects processed. Make sure resliced_masks exist and filenames match.');
 end
 
-% ---- write means first (so we know cell addresses), then add SBR formulas ----
-% We’ll assemble a cell array including formulas starting with '='.
-nRows  = size(rows,1);
-nMeans = 2 + numel(roi_masks);    % SLF + Occ + ROI means
-nCols  = 1 + nMeans + numel(roi_masks);  % Subject + means + SBRs
+% ---- Prepare data for CSV output ----
+nRows = size(rows,1);
+C = cell(nRows+1, numel(headers));
+C(1,:) = headers;   % header row
+C(2:end,:) = rows;  % data rows
 
-sheet = 'SBR';
-C = cell(nRows+1, nCols);
-C(1,1:numel(headers)) = headers;   % header row
-C(2:end,1:numel(rows(1,:))) = rows;
+% Write to CSV
+try writecell(C, out_csv); catch, write_csv_manual(C, out_csv); end
+log_msg(sprintf('\nSaved CSV: %s\nSBR = (ROI - SLF) / SLF\n', out_csv));
+log_msg(sprintf('=== Log completed at %s ===\n', datestr(now)));
 
-% Column letters for Excel formulas
-colLetters = arrayfun(@excelCol, 1:nCols, 'uni', 0);
-
-% Indices for columns
-col_Subj = 1;
-col_SLF  = 2;          % Mean_SLF
-col_Occ  = 3;          % Mean_Occ (optional)
-col_ROIstart = 4;      % first ROI mean
-col_SBRstart = 1 + (1 + nMeans); % after Subject + all means
-
-% For each row, create SBR formulas: SBR_ROI = (ROI - SLF) / SLF
-for r = 2:nRows+1
-    for k = 1:numel(roi_masks)
-        roiCol   = col_ROIstart + (k-1);
-        sbrCol   = col_SBRstart + (k-1);
-        % Excel formula referencing this row
-        roiRef = sprintf('%s%d', colLetters{roiCol}, r);
-        slfRef = sprintf('%s%d', colLetters{col_SLF}, r);
-        C{r, sbrCol} = sprintf('=(%s-%s)/%s', roiRef, slfRef, slfRef);
-    end
-end
-
-% Write to Excel (formulas preserved)
-writecell(C, out_xlsx, 'Sheet', sheet);
-
-fprintf('\nSaved Excel with means + SBR formulas:\n  %s (sheet: %s)\n', out_xlsx, sheet);
-fprintf('SBR formula per row is =(ROI - Mean_SLF) / Mean_SLF\n');
-
-end
+% Close log file
+if ~isempty(log_fid), fclose(log_fid); fprintf('Log: %s\n', log_file); end
 
 % ---------- helpers ----------
-function m = mean_in_mask(Ys, mask_path)
+    function fprintf_both(fid, msg)
+        fprintf('%s', msg);
+        if ~isempty(fid), fprintf(fid, '%s', msg); end
+    end
+
+    function m = mean_in_mask(Ys, mask_path)
 % Return mean(Ys(mask==1)); NaN if mask missing or empty
     if ~isfile(mask_path)
         m = NaN; return;
@@ -136,15 +148,25 @@ function m = mean_in_mask(Ys, mask_path)
     else
         m = mean(Ys(idx));
     end
-end
-
-function L = excelCol(n)
-% 1->A, 2->B, ... 26->Z, 27->AA ...
-    s = '';
-    while n > 0
-        r = mod(n-1,26);
-        s = [char(65+r) s]; %#ok<AGROW>
-        n = floor((n-1)/26);
     end
-    L = s;
+
+    function write_csv_manual(C, filename)
+    fid = fopen(filename, 'w'); if fid == -1, error('Cannot write: %s', filename); end
+    for i = 1:size(C,1)
+        for j = 1:size(C,2)
+            if j > 1, fprintf(fid, ','); end
+            val = C{i,j};
+            if ischar(val) || isstring(val)
+                fprintf(fid, '"%s"', strrep(char(val), '"', '""'));
+            elseif isnumeric(val) && ~isnan(val)
+                fprintf(fid, '%.6f', val);
+            else
+                fprintf(fid, 'NaN');
+            end
+        end
+        fprintf(fid, '\n');
+    end
+    fclose(fid);
+    end
+
 end
